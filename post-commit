@@ -1,0 +1,73 @@
+#!/usr/bin/env bash
+# Sample TimeStamp Authority. Can be replaced with any RFC3161 TSA.
+# Variables:
+# TSA:
+TSA="https://freetsa.org/tsr"
+TSA_CERT="cacert.pem"
+# Local Files:
+TSQ_FILE=".git/commit_request.tsq"
+TSR_FILE=".git/commit_response.tsr"
+
+# --- Get Commit Hash (needed for git notes later) ---
+if ! COMMIT_HASH=$(git rev-parse HEAD)
+then
+  echo "Error: Failed to get commit hash." >&2
+  exit 1
+fi
+
+# --- Hash the Git Commit Hash string ---
+HASH=$(echo -n "$COMMIT_HASH" | openssl dgst -sha256 -hex | sed 's/^.* //')
+if [ -z "$HASH" ]; then
+  echo "Error: Failed to calculate hash of commit hash." >&2
+  exit 1
+fi
+
+# --- Generate the TimeStamp Request file ---
+if ! openssl ts -query -digest "$HASH" -sha256 -cert -out "$TSQ_FILE"
+then
+  echo "Error: openssl ts -query failed." >&2
+  rm -f "$TSQ_FILE"
+  exit 1
+fi
+
+# --- File the Request with the TSA ---
+curl -s -S -f \
+   -H "Content-Type: application/timestamp-query" \
+   --data-binary "@$TSQ_FILE" \
+   -o "$TSR_FILE" \
+   "$TSA"
+
+CURL_EXIT_CODE=$?
+if [ $CURL_EXIT_CODE -ne 0 ]
+then
+  echo "Error: curl command failed with exit code $CURL_EXIT_CODE." >&2
+  echo "Check TSA URL ($TSA), network connectivity, and permissions." >&2
+  rm -f "$TSQ_FILE" "$TSR_FILE"
+  exit 1
+fi
+
+# --- Verify the TSA Response ---
+openssl ts -verify -in "$TSR_FILE" -queryfile "$TSQ_FILE" -CAfile "$TSA_CERT"
+
+VERIFY_EXIT_CODE=$?
+if [ $VERIFY_EXIT_CODE -ne 0 ]
+then
+  echo "Error: TSA token verification failed! (Exit code $VERIFY_EXIT_CODE)" >&2
+  echo "Token may be invalid, from wrong TSA, or doesn't match request." >&2
+  rm -f "$TSQ_FILE" "$TSR_FILE"
+  exit 1
+fi
+
+# --- Store verified token in Git Notes ---
+git notes --ref=alibi add -f --no-stripspace -F "$TSR_FILE" "$COMMIT_HASH"
+
+NOTES_EXIT_CODE=$?
+if [ $NOTES_EXIT_CODE -ne 0 ]; then
+ echo "Error: Failed to add git note. (Exit code $NOTES_EXIT_CODE)" >&2
+ rm -f "$TSQ_FILE" "$TSR_FILE"
+ exit 1
+fi
+
+# --- Clean up & Exit ---
+rm -f "$TSQ_FILE" "$TSR_FILE"
+exit 0
